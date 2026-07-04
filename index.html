@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Teleobjetivo WebGL</title>
+<style>
+  :root{
+    --bg:#15181A;
+    --panel:#1C2023;
+    --paper:#E7E9E6;
+    --muted:#7C8489;
+    --accent:#8FA6A0;
+    --line: rgba(231,233,230,0.12);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;background:var(--bg);color:var(--paper);
+    font-family:'Courier New', monospace;
+    min-height:100vh;padding:40px 20px 70px;
+    display:flex;flex-direction:column;align-items:center;
+  }
+  .wrap{max-width:680px;width:100%;}
+  h1{font-size:15px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin:0 0 4px;}
+  .sub{font-size:12px;color:var(--muted);margin:0 0 22px;line-height:1.6;}
+
+  .tabs{display:flex;gap:6px;margin-bottom:16px;}
+  .tab{
+    font-size:11px;letter-spacing:.05em;text-transform:uppercase;
+    padding:8px 14px;border:1px solid var(--line);border-radius:3px;
+    cursor:pointer;color:var(--muted);background:transparent;
+  }
+  .tab.active{border-color:var(--accent);color:var(--accent);}
+
+  .panel{
+    background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:18px;
+  }
+  .canvas-holder{
+    width:100%;min-height:260px;
+    background:repeating-conic-gradient(#20242600 0% 25%, #ffffff05 0% 50%) 50% / 18px 18px;
+    display:flex;align-items:center;justify-content:center;border-radius:3px;overflow:hidden;
+    position:relative;
+  }
+  canvas{max-width:100%;display:block;}
+  video{display:none;}
+  .dropzone{padding:60px 20px;text-align:center;color:var(--muted);font-size:12px;cursor:pointer;width:100%;}
+  .dropzone strong{display:block;color:var(--paper);font-size:13px;margin-bottom:6px;letter-spacing:.03em;}
+  input[type=file]{display:none;}
+
+  .cam-start{padding:60px 20px;text-align:center;}
+  .cam-start strong{display:block;color:var(--paper);font-size:13px;margin-bottom:12px;}
+
+  .controls{margin-top:18px;display:flex;flex-direction:column;gap:14px;}
+  .row{display:flex;align-items:center;gap:12px;}
+  .row label{font-size:10.5px;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;width:120px;flex-shrink:0;}
+  input[type=range]{-webkit-appearance:none;flex:1;height:2px;background:var(--line);border-radius:2px;outline:none;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--accent);cursor:pointer;}
+  .val{font-size:11px;color:var(--accent);min-width:26px;text-align:right;}
+
+  .btn-row{display:flex;gap:10px;margin-top:18px;flex-wrap:wrap;}
+  button{
+    font-family:'Courier New',monospace;font-size:11px;letter-spacing:.05em;text-transform:uppercase;
+    background:transparent;color:var(--paper);border:1px solid var(--muted);border-radius:3px;
+    padding:9px 16px;cursor:pointer;
+  }
+  button:hover{border-color:var(--accent);color:var(--accent);}
+  button:disabled{opacity:.35;cursor:not-allowed;}
+
+  .note{font-size:10.5px;color:var(--muted);margin-top:10px;line-height:1.6;}
+
+  /* ---- Responsive / móvil ---- */
+  @media (max-width: 560px){
+    body{padding:20px 12px 50px;}
+    h1{font-size:14px;}
+    .sub{font-size:11.5px;}
+    .tabs{width:100%;}
+    .tab{flex:1;text-align:center;padding:10px 6px;font-size:10.5px;}
+    .panel{padding:14px;}
+    .canvas-holder{min-height:200px;}
+    .row{flex-wrap:wrap;}
+    .row label{width:100%;margin-bottom:2px;}
+    input[type=range]{width:100%;}
+    .val{width:100%;text-align:left;}
+    .btn-row{flex-direction:column;}
+    button{width:100%;padding:14px 16px;font-size:13px;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Teleobjetivo</h1>
+  <p class="sub">Blur atmosférico + aberración cromática radial + curva de contraste tipo S, renderizado en WebGL (shader plano, sin Three.js).</p>
+
+  <div class="tabs">
+    <button class="tab active" data-mode="photo">Foto</button>
+    <button class="tab" data-mode="video">Video</button>
+    <button class="tab" data-mode="camera">Cámara</button>
+  </div>
+
+  <div class="panel">
+    <div class="canvas-holder" id="canvasHolder">
+      <div class="dropzone" id="dropzone">
+        <strong>Cargar fotografía</strong>
+        Arrastra una imagen o haz clic para elegir un archivo
+        <input type="file" id="fileInput" accept="image/*">
+      </div>
+      <div class="cam-start" id="camStart" style="display:none;">
+        <strong>Activar cámara</strong>
+        <button id="camStartBtn">Iniciar cámara</button>
+      </div>
+      <video id="video" playsinline muted></video>
+      <canvas id="glcanvas" style="display:none;"></canvas>
+    </div>
+
+    <div class="controls">
+      <div class="row">
+        <label>Pixelado / mosaico</label>
+        <input type="range" id="pixelSlider" min="0" max="100" value="44" step="1">
+        <span class="val" id="pixelVal">44</span>
+      </div>
+      <div class="row">
+        <label>Aberración cromática</label>
+        <input type="range" id="caSlider" min="0" max="100" value="89" step="1">
+        <span class="val" id="caVal">89</span>
+      </div>
+      <div class="row">
+        <label>Clipping / contraste</label>
+        <input type="range" id="contrastSlider" min="0" max="100" value="16" step="1">
+        <span class="val" id="contrastVal">16</span>
+      </div>
+      <div class="row">
+        <label>Grano</label>
+        <input type="range" id="noiseSlider" min="0" max="100" value="67" step="1">
+        <span class="val" id="noiseVal">67</span>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button id="photoBtn">📷 Tomar foto</button>
+      <button id="recordBtn">⏺ Grabar video</button>
+    </div>
+    <p class="note" id="note"></p>
+  </div>
+</div>
+
+<script src="main.js"></script>
+</body>
+</html>
