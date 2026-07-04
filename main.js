@@ -5,7 +5,7 @@
 // ============================================================
 
 const canvas = document.getElementById('glcanvas');
-const gl = canvas.getContext('webgl');
+const gl = canvas.getContext('webgl', { preserveDrawingBuffer: true });
 if (!gl) alert('Tu navegador no soporta WebGL.');
 
 // ---------------- Shaders ----------------
@@ -202,6 +202,7 @@ let rafId = null;
 let mediaRecorder = null;
 let recordedChunks = [];
 let usingVideoSource = false; // true en modo video/cámara (hay que refrescar textura cada frame)
+let facingMode = 'environment'; // cámara trasera por defecto, ideal para fotos a distancia
 
 const video = document.getElementById('video');
 const dropzone = document.getElementById('dropzone');
@@ -209,6 +210,7 @@ const camStart = document.getElementById('camStart');
 const fileInput = document.getElementById('fileInput');
 const photoBtn = document.getElementById('photoBtn');
 const recordBtn = document.getElementById('recordBtn');
+const flipBtn = document.getElementById('flipBtn');
 const note = document.getElementById('note');
 const camStartBtn = document.getElementById('camStartBtn');
 
@@ -329,21 +331,38 @@ function handleVideoFile(file) {
 
 // ---------------- Modo cámara ----------------
 
-camStartBtn.addEventListener('click', async () => {
+async function startCamera() {
+  if (mediaStream) {
+    mediaStream.getTracks().forEach((t) => t.stop());
+    mediaStream = null;
+  }
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+    mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode }, audio: false });
     video.srcObject = mediaStream;
     video.onloadedmetadata = () => {
       camStart.style.display = 'none';
       canvas.style.display = 'block';
+      flipBtn.style.display = 'inline-block';
       usingVideoSource = true;
       setupCanvasForVideo();
       video.play();
       startFrameLoop();
     };
   } catch (err) {
+    // si "environment" falla (ej. laptop sin cámara trasera), probamos con "user"
+    if (facingMode === 'environment') {
+      facingMode = 'user';
+      return startCamera();
+    }
     note.textContent = 'No se pudo acceder a la cámara: ' + err.message;
   }
+}
+
+camStartBtn.addEventListener('click', startCamera);
+
+flipBtn.addEventListener('click', () => {
+  facingMode = facingMode === 'environment' ? 'user' : 'environment';
+  startCamera();
 });
 
 // ---------------- Cambio de pestañas ----------------
@@ -377,6 +396,8 @@ function switchMode(newMode) {
   camStart.style.display = 'none';
   canvas.style.display = 'none';
   fileInput.value = '';
+  flipBtn.style.display = 'none';
+  if (typeof saveVideoBtn !== 'undefined') saveVideoBtn.style.display = 'none';
   note.textContent = '';
 
   if (mode === 'photo') {
@@ -399,7 +420,21 @@ function switchMode(newMode) {
 // En móvil, navigator.share con un archivo abre el diálogo nativo de
 // compartir/guardar, donde el usuario puede elegir "Guardar en Fotos" o
 // equivalente. Si el navegador no lo soporta (ej. desktop), caemos a una
-// descarga normal.
+// descarga normal, y como último recurso abrimos el archivo en una pestaña
+// nueva para que se pueda guardar manualmente (mantener presionado -> guardar).
+//
+// IMPORTANTE: navigator.share() debe llamarse muy cerca del toque del
+// usuario (sobre todo en Safari/iOS) o el navegador lo bloquea en silencio.
+// Por eso evitamos pasos asíncronos (como canvas.toBlob) antes de llamarlo.
+
+function dataURLtoBlob(dataUrl) {
+  const [header, base64] = dataUrl.split(',');
+  const mime = header.match(/:(.*?);/)[1];
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
 
 async function saveBlob(blob, filename, mimeType) {
   const file = new File([blob], filename, { type: mimeType });
@@ -409,25 +444,39 @@ async function saveBlob(blob, filename, mimeType) {
       await navigator.share({ files: [file] });
       return;
     } catch (err) {
-      if (err.name === 'AbortError') return;
+      if (err.name === 'AbortError') return; // el usuario canceló, no hacemos nada más
+      // si falló por otra razón (ej. sin permiso de gesto), seguimos al fallback
     }
   }
 
+  // Fallback 1: descarga normal
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.download = filename;
   link.href = url;
+  document.body.appendChild(link);
   link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  link.remove();
+
+  // Fallback 2: abrir en pestaña nueva, por si la descarga no se disparó
+  // (algunos navegadores móviles ignoran el atributo download en blobs).
+  setTimeout(() => {
+    window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }, 300);
 }
 
 // ---------------- Botones ----------------
 
 photoBtn.addEventListener('click', () => {
-  canvas.toBlob((blob) => {
-    if (blob) saveBlob(blob, 'teleobjetivo.png', 'image/png');
-  }, 'image/png');
+  // toDataURL es SÍNCRONO (a diferencia de toBlob), así que mantenemos
+  // el gesto del usuario activo hasta el momento de llamar a share().
+  const dataUrl = canvas.toDataURL('image/png');
+  const blob = dataURLtoBlob(dataUrl);
+  saveBlob(blob, `teleobjetivo-${Date.now()}.png`, 'image/png');
 });
+
+let lastRecordedBlob = null;
 
 recordBtn.addEventListener('click', () => {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
@@ -437,12 +486,32 @@ recordBtn.addEventListener('click', () => {
   }
   const stream = canvas.captureStream(30);
   recordedChunks = [];
-  mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+  const mimeType = MediaRecorder.isTypeSupported('video/mp4')
+    ? 'video/mp4'
+    : 'video/webm';
+  mediaRecorder = new MediaRecorder(stream, { mimeType });
   mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
   mediaRecorder.onstop = () => {
-    const blob = new Blob(recordedChunks, { type: 'video/webm' });
-    saveBlob(blob, 'teleobjetivo.webm', 'video/webm');
+    lastRecordedBlob = new Blob(recordedChunks, { type: mimeType });
+    const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+    saveVideoBtn.dataset.ext = ext;
+    saveVideoBtn.style.display = 'inline-block';
+    note.textContent = 'Video listo — toca "Guardar video" para guardarlo (el share necesita un toque directo).';
   };
   mediaRecorder.start();
   recordBtn.textContent = '⏹ Detener grabación';
+});
+
+// Botón separado que aparece después de grabar: al tocarlo, el share() se
+// dispara directo desde ESTE clic, así que sí cuenta como gesto de usuario.
+const saveVideoBtn = document.createElement('button');
+saveVideoBtn.id = 'saveVideoBtn';
+saveVideoBtn.textContent = '💾 Guardar video';
+saveVideoBtn.style.display = 'none';
+recordBtn.insertAdjacentElement('afterend', saveVideoBtn);
+
+saveVideoBtn.addEventListener('click', () => {
+  if (!lastRecordedBlob) return;
+  const ext = saveVideoBtn.dataset.ext || 'webm';
+  saveBlob(lastRecordedBlob, `teleobjetivo-${Date.now()}.${ext}`, lastRecordedBlob.type);
 });
