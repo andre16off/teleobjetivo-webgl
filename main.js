@@ -207,12 +207,47 @@ let facingMode = 'environment'; // cámara trasera por defecto, ideal para fotos
 const video = document.getElementById('video');
 const dropzone = document.getElementById('dropzone');
 const camStart = document.getElementById('camStart');
+const canvasHolder = document.getElementById('canvasHolder');
 const fileInput = document.getElementById('fileInput');
 const photoBtn = document.getElementById('photoBtn');
 const recordBtn = document.getElementById('recordBtn');
 const flipBtn = document.getElementById('flipBtn');
 const note = document.getElementById('note');
 const camStartBtn = document.getElementById('camStartBtn');
+
+// ---------------- Tamaño de canvas responsive ----------------
+// En vez de un ancho máximo fijo, medimos el espacio real disponible en
+// .canvas-holder (que cambia con el layout: columna en retrato, fila en
+// apaisado móvil) y usamos devicePixelRatio para que se vea nítido en
+// pantallas retina/móvil, sin pasarnos de un techo razonable de píxeles.
+
+function getAvailableHolderSize() {
+  const rect = canvasHolder.getBoundingClientRect();
+  // fallback por si el holder aún no tiene tamaño (p.ej. display:none)
+  const w = rect.width > 0 ? rect.width : 640;
+  const h = rect.height > 0 ? rect.height : 480;
+  return { w, h };
+}
+
+function computeCanvasSize(sourceW, sourceH) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const { w: holderW, h: holderH } = getAvailableHolderSize();
+  const maxCssW = Math.max(120, holderW);
+  const maxCssH = Math.max(120, holderH);
+
+  const srcRatio = sourceW / sourceH;
+  let cssW = maxCssW;
+  let cssH = cssW / srcRatio;
+  if (cssH > maxCssH) {
+    cssH = maxCssH;
+    cssW = cssH * srcRatio;
+  }
+
+  return {
+    width: Math.max(1, Math.round(cssW * dpr)),
+    height: Math.max(1, Math.round(cssH * dpr)),
+  };
+}
 
 // ---------------- Render ----------------
 
@@ -240,10 +275,9 @@ function render() {
 
 function drawImageToCanvas(image) {
   currentImage = image;
-  const maxW = 700;
-  const scale = Math.min(1, maxW / image.width);
-  canvas.width = Math.round(image.width * scale);
-  canvas.height = Math.round(image.height * scale);
+  const size = computeCanvasSize(image.width, image.height);
+  canvas.width = size.width;
+  canvas.height = size.height;
 
   gl.bindTexture(gl.TEXTURE_2D, texture);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
@@ -251,10 +285,9 @@ function drawImageToCanvas(image) {
 }
 
 function setupCanvasForVideo() {
-  const maxW = 640;
-  const scale = Math.min(1, maxW / video.videoWidth);
-  canvas.width = Math.round(video.videoWidth * scale);
-  canvas.height = Math.round(video.videoHeight * scale);
+  const size = computeCanvasSize(video.videoWidth, video.videoHeight);
+  canvas.width = size.width;
+  canvas.height = size.height;
 }
 
 function startFrameLoop() {
@@ -269,13 +302,41 @@ function startFrameLoop() {
   loop();
 }
 
+// Reacciona a cambios de tamaño de ventana / rotación de pantalla,
+// recalculando el tamaño del canvas para el contenido activo.
+let resizeTimer = null;
+function handleViewportResize() {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (mode === 'photo' && currentImage) {
+      drawImageToCanvas(currentImage);
+    } else if (usingVideoSource && video.videoWidth) {
+      setupCanvasForVideo();
+    }
+  }, 120);
+}
+window.addEventListener('resize', handleViewportResize);
+window.addEventListener('orientationchange', handleViewportResize);
+
 // ---------------- Sliders (re-renderizan en modo foto; en video/cámara el loop ya renderiza cada frame) ----------------
+
+// Actualiza el relleno de color del slider (--pct) para que coincida
+// visualmente con la posición del thumb, al estilo del scrubber de
+// Apple Music.
+function updateSliderFill(el) {
+  const min = Number(el.min) || 0;
+  const max = Number(el.max) || 100;
+  const pct = ((el.value - min) / (max - min)) * 100;
+  el.style.setProperty('--pct', pct + '%');
+}
 
 ['pixelSlider', 'caSlider', 'contrastSlider', 'noiseSlider'].forEach((id) => {
   const el = document.getElementById(id);
   const out = document.getElementById(id.replace('Slider', 'Val'));
+  updateSliderFill(el);
   el.addEventListener('input', () => {
     out.textContent = el.value;
+    updateSliderFill(el);
     if (mode === 'photo' && currentImage) render();
   });
 });
@@ -381,6 +442,8 @@ function stopEverything() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop();
   }
+  setRecordButtonState(false);
+  if (typeof saveVideoBtn !== 'undefined') saveVideoBtn.style.display = 'none';
   video.pause();
   video.srcObject = null;
   video.src = '';
@@ -397,7 +460,6 @@ function switchMode(newMode) {
   canvas.style.display = 'none';
   fileInput.value = '';
   flipBtn.style.display = 'none';
-  if (typeof saveVideoBtn !== 'undefined') saveVideoBtn.style.display = 'none';
   note.textContent = '';
 
   if (mode === 'photo') {
@@ -413,8 +475,6 @@ function switchMode(newMode) {
     note.textContent = 'La cámara se procesa localmente en tu navegador, no se sube a ningún servidor.';
   }
 }
-
-// ---------------- Botones ----------------
 
 // ---------------- Guardar en galería (Web Share API con fallback a descarga) ----------------
 // En móvil, navigator.share con un archivo abre el diálogo nativo de
@@ -478,10 +538,25 @@ photoBtn.addEventListener('click', () => {
 
 let lastRecordedBlob = null;
 
+// Íconos vectoriales para los dos estados del botón de grabación, y para
+// el botón de guardar que aparece después. Nada de emojis: un solo color
+// (currentColor), coherente con el resto de la interfaz.
+const ICON_RECORD = '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg>';
+const ICON_STOP = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+const ICON_SAVE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 19h14"/></svg>';
+
+function setRecordButtonState(isRecording) {
+  recordBtn.classList.toggle('recording', isRecording);
+  recordBtn.innerHTML = isRecording
+    ? `${ICON_STOP} Detener`
+    : `${ICON_RECORD} Grabar video`;
+}
+setRecordButtonState(false);
+
 recordBtn.addEventListener('click', () => {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop();
-    recordBtn.textContent = '⏺ Grabar video';
+    setRecordButtonState(false);
     return;
   }
   const stream = canvas.captureStream(30);
@@ -495,18 +570,19 @@ recordBtn.addEventListener('click', () => {
     lastRecordedBlob = new Blob(recordedChunks, { type: mimeType });
     const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
     saveVideoBtn.dataset.ext = ext;
-    saveVideoBtn.style.display = 'inline-block';
+    saveVideoBtn.style.display = 'inline-flex';
     note.textContent = 'Video listo — toca "Guardar video" para guardarlo (el share necesita un toque directo).';
   };
   mediaRecorder.start();
-  recordBtn.textContent = '⏹ Detener grabación';
+  setRecordButtonState(true);
 });
 
 // Botón separado que aparece después de grabar: al tocarlo, el share() se
 // dispara directo desde ESTE clic, así que sí cuenta como gesto de usuario.
 const saveVideoBtn = document.createElement('button');
 saveVideoBtn.id = 'saveVideoBtn';
-saveVideoBtn.textContent = '💾 Guardar video';
+saveVideoBtn.className = 'primary';
+saveVideoBtn.innerHTML = `${ICON_SAVE} Guardar video`;
 saveVideoBtn.style.display = 'none';
 recordBtn.insertAdjacentElement('afterend', saveVideoBtn);
 
